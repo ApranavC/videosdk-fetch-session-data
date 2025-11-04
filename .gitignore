@@ -1,0 +1,6 @@
+pycache/
+*.pyc
+*.csv
+.env
+*.log
+.DS_Store

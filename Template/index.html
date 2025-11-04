@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>VideoSDK Sessions</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+        body { font-family: Arial, sans-serif; background: #f6f8fa; padding: 40px; }
+        .card { background: #ffffff; padding: 20px; border-radius: 10px; max-width: 1000px; margin: auto; box-shadow: 0 0 5px rgba(0,0,0,0.1); }
+        h2 { text-align: center; margin-top: 0; }
+        label { font-weight: 600; display: block; margin-top: 10px; }
+        input, button { width: 100%; padding: 10px; margin: 6px 0 10px; border-radius: 5px; border: 1px solid #ccc; box-sizing: border-box; }
+        button { background: #007bff; color: white; border: none; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .row { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; }
+        .actions { display: flex; gap: 12px; align-items: center; }
+        .actions a { text-decoration: none; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #e5e7eb; padding: 8px; text-align: left; }
+        th { background: #f3f4f6; }
+        #status { margin-top: 8px; color: #555; font-size: 14px; }
+        .progress { margin-top: 10px; display: none; align-items: center; gap: 8px; }
+        .progress progress { width: 250px; height: 16px; }
+        #csvProgressWrap { margin-top: 8px; }
+    </style>
+    <script>
+        function setDisabled(disabled) {
+            for (const id of ['api_key','year','month','participant_columns']) {
+                const el = document.getElementById(id);
+                if (el) el.disabled = disabled;
+            }
+            document.getElementById('submitBtn').disabled = disabled;
+        }
+        function renderTable(sessions) {
+            const tbody = document.getElementById('tbody');
+            tbody.innerHTML = '';
+            for (const s of sessions) {
+                const tr = document.createElement('tr');
+                const participants = (s.participants || []).length;
+                tr.innerHTML = `
+                    <td>${s.id || ''}</td>
+                    <td>${s.roomId || ''}</td>
+                    <td>${s.start || ''}</td>
+                    <td>${s.end || ''}</td>
+                    <td>${s.status || ''}</td>
+                    <td>${participants}</td>
+                `;
+                tbody.appendChild(tr);
+            }
+        }
+        async function handleFetch(event) {
+            event.preventDefault();
+            const api_key = document.getElementById('api_key').value.trim();
+            const year = document.getElementById('year').value.trim();
+            const month = document.getElementById('month').value.trim();
+            const participant_columns = document.getElementById('participant_columns').value.trim();
+            const status = document.getElementById('status');
+            const download = document.getElementById('download');
+            const progressWrap = document.getElementById('progressWrap');
+            const progress = document.getElementById('progress');
+            const progressText = document.getElementById('progressText');
+
+            if (!api_key || !year || !month) {
+                status.textContent = 'Please fill all required fields.';
+                return;
+            }
+
+            setDisabled(true);
+            status.textContent = 'Starting fetch...';
+            progress.value = 0; progress.max = 1; progressWrap.style.display = 'flex';
+            progressText.textContent = '0%';
+            download.href = '#'; download.setAttribute('aria-disabled','true');
+
+            const qsParams = { api_key, year, month };
+            if (participant_columns) qsParams.participant_columns = participant_columns;
+            const qs = new URLSearchParams(qsParams).toString();
+
+            // Stream progress via SSE
+            const es = new EventSource(`/fetch-stream?${qs}`);
+            let lastPage = 1;
+            let sessions = [];
+            es.onmessage = (ev) => {
+                try {
+                    const msg = JSON.parse(ev.data);
+                    if (msg.type === 'init') {
+                        lastPage = msg.lastPage || 1;
+                        progress.max = lastPage;
+                        progressText.textContent = `0/${lastPage}`;
+                        status.textContent = 'Fetching pages...';
+                    } else if (msg.type === 'progress') {
+                        progress.value = msg.currentPage || 0;
+                        progressText.textContent = `${msg.currentPage || 0}/${lastPage}`;
+                    } else if (msg.type === 'complete') {
+                        sessions = msg.sessions || [];
+                        es.close();
+                        status.textContent = `Found ${msg.count || sessions.length} sessions`;
+                        renderTable(sessions);
+                        download.href = `/generate-csv?${qs}`;
+                        download.removeAttribute('aria-disabled');
+                        progressWrap.style.display = 'none';
+                        setDisabled(false);
+                    } else if (msg.type === 'error') {
+                        es.close();
+                        status.textContent = `Error: ${msg.status} ${msg.detail || ''}`;
+                        progressWrap.style.display = 'none';
+                        setDisabled(false);
+                    }
+                } catch (e) {
+                    // ignore parsing errors
+                }
+            };
+            es.onerror = () => {
+                es.close();
+                status.textContent = 'Stream error. Falling back to direct fetch...';
+                fetch(`/fetch?${qs}`).then(async (res) => {
+                    if (!res.ok) throw new Error(await res.text());
+                    const data = await res.json();
+                    renderTable(data.sessions || []);
+                    status.textContent = `Found ${data.count || 0} sessions`;
+                    download.href = `/generate-csv?${qs}`;
+                    download.removeAttribute('aria-disabled');
+                }).catch(err => {
+                    status.textContent = `Error: ${err.message}`;
+                }).finally(() => {
+                    progressWrap.style.display = 'none';
+                    setDisabled(false);
+                });
+            };
+        }
+        function handleDownload(event) {
+            event.preventDefault();
+            const download = document.getElementById('download');
+            if (download.hasAttribute('aria-disabled')) return;
+            const api_key = document.getElementById('api_key').value.trim();
+            const year = document.getElementById('year').value.trim();
+            const month = document.getElementById('month').value.trim();
+            const participant_columns = document.getElementById('participant_columns').value.trim();
+            const csvProgressWrap = document.getElementById('csvProgressWrap');
+            const csvProgress = document.getElementById('csvProgress');
+            const csvProgressText = document.getElementById('csvProgressText');
+            const status = document.getElementById('status');
+            download.href = '#'; download.setAttribute('aria-disabled','true');
+            csvProgressWrap.style.display = 'flex';
+            csvProgress.value = 0; csvProgress.max = 1;
+            csvProgressText.textContent = 'Starting...';
+            status.textContent = 'Generating CSV...';
+            const qsParams = { api_key, year, month };
+            if (participant_columns) qsParams.participant_columns = participant_columns;
+            const qs = new URLSearchParams(qsParams).toString();
+            const es = new EventSource(`/generate-csv-stream?${qs}`);
+            let total = 1;
+            es.onmessage = (ev) => {
+                try {
+                    const msg = JSON.parse(ev.data);
+                    if (msg.type === 'init') {
+                        csvProgressText.textContent = msg.message || 'Initializing...';
+                    } else if (msg.type === 'progress') {
+                        if (msg.step === 'fetch') {
+                            csvProgressText.textContent = msg.message || 'Fetching...';
+                        } else if (msg.step === 'generate') {
+                            total = msg.total || 1;
+                            csvProgress.max = total;
+                            csvProgress.value = msg.progress || 0;
+                            csvProgressText.textContent = msg.message || `Processing ${msg.progress}/${total}`;
+                        }
+                    } else if (msg.type === 'complete') {
+                        es.close();
+                        csvProgressWrap.style.display = 'none';
+                        status.textContent = `CSV ready: ${msg.filename || 'download.csv'}`;
+                        window.location.href = `/download-csv/${msg.fileId}`;
+                        download.removeAttribute('aria-disabled');
+                    } else if (msg.type === 'error') {
+                        es.close();
+                        csvProgressWrap.style.display = 'none';
+                        status.textContent = `CSV Error: ${msg.message || 'Unknown error'}`;
+                        download.removeAttribute('aria-disabled');
+                    }
+                } catch (e) {
+                    // ignore parsing errors
+                }
+            };
+            es.onerror = () => {
+                es.close();
+                csvProgressWrap.style.display = 'none';
+                status.textContent = 'CSV stream error. Falling back to direct download...';
+                window.location.href = `/generate-csv?${qs}`;
+                download.removeAttribute('aria-disabled');
+            };
+        }
+        window.addEventListener('DOMContentLoaded', () => {
+            const form = document.getElementById('form');
+            form.addEventListener('submit', handleFetch);
+            const download = document.getElementById('download');
+            download.addEventListener('click', handleDownload);
+        });
+    </script>
+</head>
+<body>
+    <div class="card">
+        <h2>VideoSDK Sessions</h2>
+        <form id="form">
+            <div class="row">
+                <div>
+                    <label for="api_key">API Key</label>
+                    <input type="text" id="api_key" placeholder="Enter your API Key" required />
+                </div>
+                <div>
+                    <label for="year">Year</label>
+                    <input type="number" id="year" placeholder="e.g., 2025" required />
+                </div>
+                <div>
+                    <label for="month">Month</label>
+                    <input type="number" id="month" placeholder="1–12" required />
+                </div>
+                <div>
+                    <label for="participant_columns">Participant columns (optional)</label>
+                    <input type="number" id="participant_columns" placeholder="e.g., 5" min="0" />
+                </div>
+                <div class="actions">
+                    <button id="submitBtn" type="submit">Fetch</button>
+                    <a id="download" href="#" aria-disabled="true">Download CSV</a>
+                </div>
+            </div>
+            <div class="progress" id="progressWrap">
+                <progress id="progress" value="0" max="1"></progress>
+                <span id="progressText">0%</span>
+            </div>
+            <div class="progress" id="csvProgressWrap" style="display: none;">
+                <progress id="csvProgress" value="0" max="1"></progress>
+                <span id="csvProgressText">0%</span>
+            </div>
+            <div id="status"></div>
+        </form>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Session ID</th>
+                    <th>Room ID</th>
+                    <th>Start</th>
+                    <th>End</th>
+                    <th>Status</th>
+                    <th># Participants</th>
+                </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+        </table>
+    </div>
+</body>
+</html>
