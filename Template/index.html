@@ -21,7 +21,14 @@
         #status { margin-top: 8px; color: #555; font-size: 14px; }
         .progress { margin-top: 10px; display: none; align-items: center; gap: 8px; }
         .progress progress { width: 250px; height: 16px; }
-        #csvProgressWrap { margin-top: 8px; }
+        .progress-text { font-size: 14px; color: #666; }
+        .label-with-info { display: flex; align-items: center; gap: 6px; }
+        .info-icon { width: 16px; height: 16px; cursor: help; position: relative; }
+        .info-icon svg { width: 100%; height: 100%; fill: #6b7280; }
+        .info-icon:hover svg { fill: #007bff; }
+        .info-tooltip { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: 5px; padding: 6px 10px; background: #1f2937; color: white; border-radius: 4px; font-size: 12px; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 10; }
+        .info-icon:hover .info-tooltip { opacity: 1; }
+        .info-tooltip::after { content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-top-color: #1f2937; }
     </style>
     <script>
         function setDisabled(disabled) {
@@ -48,6 +55,53 @@
                 tbody.appendChild(tr);
             }
         }
+        async function pollFetchStatus(jobId, qsParams) {
+            const status = document.getElementById('status');
+            const progressWrap = document.getElementById('progressWrap');
+            const progress = document.getElementById('progress');
+            const progressText = document.getElementById('progressText');
+            const download = document.getElementById('download');
+            
+            const pollInterval = setInterval(async () => {
+                try {
+                    const res = await fetch(`/fetch-status/${jobId}`);
+                    if (!res.ok) throw new Error(await res.text());
+                    const data = await res.json();
+                    
+                    if (data.status === 'completed') {
+                        clearInterval(pollInterval);
+                        progressWrap.style.display = 'none';
+                        renderTable(data.sessions || []);
+                        status.textContent = `Found ${data.count || 0} sessions`;
+                        const qs = new URLSearchParams(qsParams).toString();
+                        download.href = `/generate-csv?${qs}`;
+                        download.removeAttribute('aria-disabled');
+                        setDisabled(false);
+                    } else if (data.status === 'error') {
+                        clearInterval(pollInterval);
+                        progressWrap.style.display = 'none';
+                        status.textContent = `Error: ${data.error || 'Unknown error'}`;
+                        setDisabled(false);
+                    } else if (data.status === 'running') {
+                        progressWrap.style.display = 'flex';
+                        progress.value = data.progress || 0;
+                        progress.max = 100;
+                        if (data.total_pages) {
+                            progressText.textContent = `Page ${data.current_page || 0}/${data.total_pages} (${data.progress || 0}%)`;
+                        } else {
+                            progressText.textContent = `${data.progress || 0}%`;
+                        }
+                        status.textContent = data.message || 'Fetching sessions...';
+                    }
+                } catch (err) {
+                    clearInterval(pollInterval);
+                    progressWrap.style.display = 'none';
+                    status.textContent = `Error: ${err.message}`;
+                    setDisabled(false);
+                }
+            }, 500); // Poll every 500ms
+        }
+
         async function handleFetch(event) {
             event.preventDefault();
             const api_key = document.getElementById('api_key').value.trim();
@@ -56,9 +110,6 @@
             const participant_columns = document.getElementById('participant_columns').value.trim();
             const status = document.getElementById('status');
             const download = document.getElementById('download');
-            const progressWrap = document.getElementById('progressWrap');
-            const progress = document.getElementById('progress');
-            const progressText = document.getElementById('progressText');
 
             if (!api_key || !year || !month) {
                 status.textContent = 'Please fill all required fields.';
@@ -67,67 +118,68 @@
 
             setDisabled(true);
             status.textContent = 'Starting fetch...';
-            progress.value = 0; progress.max = 1; progressWrap.style.display = 'flex';
-            progressText.textContent = '0%';
             download.href = '#'; download.setAttribute('aria-disabled','true');
 
             const qsParams = { api_key, year, month };
             if (participant_columns) qsParams.participant_columns = participant_columns;
             const qs = new URLSearchParams(qsParams).toString();
 
-            // Stream progress via SSE
-            const es = new EventSource(`/fetch-stream?${qs}`);
-            let lastPage = 1;
-            let sessions = [];
-            es.onmessage = (ev) => {
-                try {
-                    const msg = JSON.parse(ev.data);
-                    if (msg.type === 'init') {
-                        lastPage = msg.lastPage || 1;
-                        progress.max = lastPage;
-                        progressText.textContent = `0/${lastPage}`;
-                        status.textContent = 'Fetching pages...';
-                    } else if (msg.type === 'progress') {
-                        progress.value = msg.currentPage || 0;
-                        progressText.textContent = `${msg.currentPage || 0}/${lastPage}`;
-                    } else if (msg.type === 'complete') {
-                        sessions = msg.sessions || [];
-                        es.close();
-                        status.textContent = `Found ${msg.count || sessions.length} sessions`;
-                        renderTable(sessions);
-                        download.href = `/generate-csv?${qs}`;
-                        download.removeAttribute('aria-disabled');
-                        progressWrap.style.display = 'none';
-                        setDisabled(false);
-                    } else if (msg.type === 'error') {
-                        es.close();
-                        status.textContent = `Error: ${msg.status} ${msg.detail || ''}`;
-                        progressWrap.style.display = 'none';
-                        setDisabled(false);
-                    }
-                } catch (e) {
-                    // ignore parsing errors
+            try {
+                const res = await fetch(`/fetch?${qs}`);
+                if (!res.ok) throw new Error(await res.text());
+                const data = await res.json();
+                if (data.job_id) {
+                    pollFetchStatus(data.job_id, qsParams);
+                } else {
+                    throw new Error('No job ID returned');
                 }
-            };
-            es.onerror = () => {
-                es.close();
-                status.textContent = 'Stream error. Falling back to direct fetch...';
-                fetch(`/fetch?${qs}`).then(async (res) => {
+            } catch (err) {
+                status.textContent = `Error: ${err.message}`;
+                setDisabled(false);
+            }
+        }
+        async function pollCsvStatus(jobId) {
+            const status = document.getElementById('status');
+            const csvProgressWrap = document.getElementById('csvProgressWrap');
+            const csvProgress = document.getElementById('csvProgress');
+            const csvProgressText = document.getElementById('csvProgressText');
+            
+            const pollInterval = setInterval(async () => {
+                try {
+                    const res = await fetch(`/csv-status/${jobId}`);
                     if (!res.ok) throw new Error(await res.text());
                     const data = await res.json();
-                    renderTable(data.sessions || []);
-                    status.textContent = `Found ${data.count || 0} sessions`;
-                    download.href = `/generate-csv?${qs}`;
-                    download.removeAttribute('aria-disabled');
-                }).catch(err => {
+                    
+                    if (data.status === 'completed') {
+                        clearInterval(pollInterval);
+                        csvProgressWrap.style.display = 'none';
+                        status.textContent = `CSV ready: ${data.filename || 'download.csv'}`;
+                        window.location.href = `/download-csv/${data.job_id}`;
+                    } else if (data.status === 'error') {
+                        clearInterval(pollInterval);
+                        csvProgressWrap.style.display = 'none';
+                        status.textContent = `CSV Error: ${data.error || 'Unknown error'}`;
+                    } else if (data.status === 'running') {
+                        csvProgressWrap.style.display = 'flex';
+                        csvProgress.value = data.progress || 0;
+                        csvProgress.max = 100;
+                        
+                        if (data.step === 'generate' && data.total_sessions) {
+                            csvProgressText.textContent = `Processing ${data.processed_sessions || 0}/${data.total_sessions} sessions (${data.progress || 0}%)`;
+                        } else {
+                            csvProgressText.textContent = `${data.message || 'Processing...'} (${data.progress || 0}%)`;
+                        }
+                        status.textContent = data.message || 'Generating CSV...';
+                    }
+                } catch (err) {
+                    clearInterval(pollInterval);
+                    csvProgressWrap.style.display = 'none';
                     status.textContent = `Error: ${err.message}`;
-                }).finally(() => {
-                    progressWrap.style.display = 'none';
-                    setDisabled(false);
-                });
-            };
+                }
+            }, 500); // Poll every 500ms
         }
-        function handleDownload(event) {
+
+        async function handleDownload(event) {
             event.preventDefault();
             const download = document.getElementById('download');
             if (download.hasAttribute('aria-disabled')) return;
@@ -135,57 +187,29 @@
             const year = document.getElementById('year').value.trim();
             const month = document.getElementById('month').value.trim();
             const participant_columns = document.getElementById('participant_columns').value.trim();
-            const csvProgressWrap = document.getElementById('csvProgressWrap');
-            const csvProgress = document.getElementById('csvProgress');
-            const csvProgressText = document.getElementById('csvProgressText');
             const status = document.getElementById('status');
-            download.href = '#'; download.setAttribute('aria-disabled','true');
+            const csvProgressWrap = document.getElementById('csvProgressWrap');
+            
+            status.textContent = 'Starting CSV generation...';
             csvProgressWrap.style.display = 'flex';
-            csvProgress.value = 0; csvProgress.max = 1;
-            csvProgressText.textContent = 'Starting...';
-            status.textContent = 'Generating CSV...';
+            
             const qsParams = { api_key, year, month };
             if (participant_columns) qsParams.participant_columns = participant_columns;
             const qs = new URLSearchParams(qsParams).toString();
-            const es = new EventSource(`/generate-csv-stream?${qs}`);
-            let total = 1;
-            es.onmessage = (ev) => {
-                try {
-                    const msg = JSON.parse(ev.data);
-                    if (msg.type === 'init') {
-                        csvProgressText.textContent = msg.message || 'Initializing...';
-                    } else if (msg.type === 'progress') {
-                        if (msg.step === 'fetch') {
-                            csvProgressText.textContent = msg.message || 'Fetching...';
-                        } else if (msg.step === 'generate') {
-                            total = msg.total || 1;
-                            csvProgress.max = total;
-                            csvProgress.value = msg.progress || 0;
-                            csvProgressText.textContent = msg.message || `Processing ${msg.progress}/${total}`;
-                        }
-                    } else if (msg.type === 'complete') {
-                        es.close();
-                        csvProgressWrap.style.display = 'none';
-                        status.textContent = `CSV ready: ${msg.filename || 'download.csv'}`;
-                        window.location.href = `/download-csv/${msg.fileId}`;
-                        download.removeAttribute('aria-disabled');
-                    } else if (msg.type === 'error') {
-                        es.close();
-                        csvProgressWrap.style.display = 'none';
-                        status.textContent = `CSV Error: ${msg.message || 'Unknown error'}`;
-                        download.removeAttribute('aria-disabled');
-                    }
-                } catch (e) {
-                    // ignore parsing errors
+            
+            try {
+                const res = await fetch(`/generate-csv?${qs}`);
+                if (!res.ok) throw new Error(await res.text());
+                const data = await res.json();
+                if (data.job_id) {
+                    pollCsvStatus(data.job_id);
+                } else {
+                    throw new Error('No job ID returned');
                 }
-            };
-            es.onerror = () => {
-                es.close();
+            } catch (err) {
                 csvProgressWrap.style.display = 'none';
-                status.textContent = 'CSV stream error. Falling back to direct download...';
-                window.location.href = `/generate-csv?${qs}`;
-                download.removeAttribute('aria-disabled');
-            };
+                status.textContent = `Error: ${err.message}`;
+            }
         }
         window.addEventListener('DOMContentLoaded', () => {
             const form = document.getElementById('form');
@@ -201,8 +225,16 @@
         <form id="form">
             <div class="row">
                 <div>
-                    <label for="api_key">API Key</label>
-                    <input type="text" id="api_key" placeholder="Enter your API Key" required />
+                    <div class="label-with-info">
+                        <label for="api_key">Token</label>
+                        <div class="info-icon">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+                            </svg>
+                            <span class="info-tooltip">Login to app.videosdk.live to get the token</span>
+                        </div>
+                    </div>
+                    <input type="text" id="api_key" placeholder="Enter your VideoSDK Token" required />
                 </div>
                 <div>
                     <label for="year">Year</label>
@@ -222,12 +254,12 @@
                 </div>
             </div>
             <div class="progress" id="progressWrap">
-                <progress id="progress" value="0" max="1"></progress>
-                <span id="progressText">0%</span>
+                <progress id="progress" value="0" max="100"></progress>
+                <span class="progress-text" id="progressText">0%</span>
             </div>
             <div class="progress" id="csvProgressWrap" style="display: none;">
-                <progress id="csvProgress" value="0" max="1"></progress>
-                <span id="csvProgressText">0%</span>
+                <progress id="csvProgress" value="0" max="100"></progress>
+                <span class="progress-text" id="csvProgressText">0%</span>
             </div>
             <div id="status"></div>
         </form>
