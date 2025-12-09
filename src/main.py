@@ -25,7 +25,6 @@ DELAY_SEC = 0.2
 jobs: Dict[str, Dict[str, Any]] = {}
 jobs_lock = threading.Lock()
 
-
 def month_start_end_epoch_ms(year: int, month: int):
     start_dt = datetime(year, month, 1, tzinfo=timezone.utc)
     if month == 12:
@@ -38,8 +37,8 @@ def month_start_end_epoch_ms(year: int, month: int):
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    """Simple HTML form UI"""
     return templates.TemplateResponse("index.html", {"request": request})
+
 
 @app.get("/health")
 def health():
@@ -61,9 +60,9 @@ def fetch_sessions(api_key: str, year: int, month: int, job_id: str = None):
                         jobs[job_id]["progress"] = int((page / last_page) * 100)
 
         payload = {"page": page, "perPage": PER_PAGE, "startDate": start_ms, "endDate": end_ms}
-        headers = {"Authorization": api_key, "Content-Type": "application/json"}
-        resp = requests.get(API_URL, headers=headers, params=payload)
+        headers = {"Authorization": api_key}
 
+        resp = requests.get(API_URL, headers=headers, params=payload)
         if resp.status_code != 200:
             if job_id:
                 with jobs_lock:
@@ -85,6 +84,7 @@ def fetch_sessions(api_key: str, year: int, month: int, job_id: str = None):
 
         if page_info.get("currentPage", page) >= last_page:
             break
+
         page += 1
         time.sleep(DELAY_SEC)
 
